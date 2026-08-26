@@ -144,31 +144,57 @@ def erro_interpolacao(completo, escolhidos):
 # escrita no formato MPC
 # --------------------------------------------------------------------------
 
-def escolher_decimais(valores, monotonico=False, minimo=2, maximo=12):
-    """Quantas casas decimais preservam a curva depois do arredondamento.
+def aplicar_regras(sel, dec_e, dec_s, gap):
+    """Arredonda os pontos e descarta os que o Cosmos nao digere.
 
-    O criterio e relativo a AMPLITUDE da grandeza, nao ao valor de cada ponto:
-    guarda ~5 digitos significativos em relacao ao maior valor da curva. Isso
-    importa porque a faixa muda muito de material para material -- um elastomero
-    chega a 2,7 de deformacao e 5 casas bastam, enquanto um metal para em 0,0077
-    e 5 casas achatariam o trecho elastico inteiro em poucos degraus.
+    Duas regras do solver, e as duas sao eliminatorias:
 
-    Com `monotonico`, tambem exige que os valores continuem estritamente
-    crescentes depois de arredondados: dois pontos que colapsam no mesmo valor
-    invalidariam a tabela.
+    * no maximo 2 casas decimais -- e o que o arquivo modelo usa;
+    * degrau minimo de tensao entre pontos consecutivos (`gap`, tipicamente
+      0,1 MPa). Pontos praticamente empatados em tensao fazem o Cosmos se
+      perder na interpolacao, entao e melhor um ponto a menos do que dois
+      colados.
+
+    A deformacao tambem precisa continuar estritamente crescente depois do
+    arredondamento -- dois pontos no mesmo degrau invalidariam a tabela.
     """
-    pico = max((abs(v) for v in valores), default=0.0)
-    if not pico:
-        return minimo
-    tolerancia = pico * 1e-5
-    for d in range(minimo, maximo + 1):
-        arred = [round(v, d) for v in valores]
-        if max(abs(a - v) for a, v in zip(arred, valores)) > tolerancia:
-            continue
-        if monotonico and any(b <= a for a, b in zip(arred, arred[1:])):
-            continue
-        return d
-    return maximo
+    sel = sorted(sel)          # o ramo de compressao chega em ordem decrescente
+    out = []
+    for e, s_ in sel:
+        er, sr = round(e, dec_e), round(s_, dec_s)
+        if out:
+            if er <= out[-1][0]:
+                continue
+            if abs(sr - out[-1][1]) < gap - 1e-9:
+                continue
+        out.append((er, sr))
+    # o extremo da curva nao pode sumir: se caiu, troca pelo ultimo aceito
+    ue, us = round(sel[-1][0], dec_e), round(sel[-1][1], dec_s)
+    if out and out[-1][0] != ue:
+        if len(out) > 1 and ue > out[-2][0] and abs(us - out[-2][1]) >= gap - 1e-9:
+            out[-1] = (ue, us)
+    return out
+
+
+def selecionar_com_regras(pts, alvo, dec_e, dec_s, gap):
+    """Escolhe pontos ate sobrarem `alvo` DEPOIS de aplicadas as regras.
+
+    Arredondamento e degrau minimo derrubam parte do que foi escolhido, entao
+    pede-se mais do que o alvo e repete-se ate fechar a conta.
+    """
+    pedido, melhor = alvo, []
+    while pedido <= len(pts):
+        final = aplicar_regras(selecionar(pts, pedido), dec_e, dec_s, gap)
+        if len(final) > len(melhor):
+            melhor = final
+        if len(final) >= alvo:
+            break
+        pedido += max(1, alvo - len(final))
+    if len(melhor) > alvo:
+        reduzido = aplicar_regras(selecionar(melhor, alvo), dec_e, dec_s, gap)
+        if len(reduzido) >= alvo - 1:
+            melhor = reduzido
+    return melhor
 
 
 def fmt(v, dec):
@@ -291,10 +317,10 @@ def main():
                     help="unidade da deformacao no CSV (padrao percent)")
     ap.add_argument("--largura", type=int, default=70,
                     help="caracteres de dado por linha, antes do & (padrao 70)")
-    ap.add_argument("--decimais-strain", type=int,
-                    help="casas decimais da deformacao (padrao: automatico)")
-    ap.add_argument("--decimais-stress", type=int,
-                    help="casas decimais da tensao (padrao: automatico)")
+    ap.add_argument("--decimais", type=int, default=2,
+                    help="casas decimais; o Cosmos aceita no maximo 2 (padrao)")
+    ap.add_argument("--gap-stress", type=float, default=0.1,
+                    help="degrau minimo de tensao entre pontos (padrao 0.1)")
     ap.add_argument("--anexar", action="store_true",
                     help="acrescenta o bloco a um .ses existente (outra temperatura)")
     ap.add_argument("--validar", help="so confere um .ses existente e sai")
@@ -333,23 +359,26 @@ def main():
     else:
         por_ramo = {s: args.pontos for s in ramos}
 
+    dec = args.decimais
     escolhidos, relatorio = {}, []
     for sinal, (caminho, pts) in sorted(ramos.items()):
-        sel = selecionar(pts, por_ramo[sinal])
+        sel = selecionar_com_regras(pts, por_ramo[sinal], dec, dec, args.gap_stress)
+        if len(sel) < 2:
+            sys.exit(
+                "ERRO: com %d casas decimais a curva de %s colapsa em %d ponto(s).\n"
+                "      A deformacao vai ate %.6f, ou seja, cabe em menos de um\n"
+                "      degrau de 0,%s. Reveja a unidade da deformacao ou use\n"
+                "      --decimais com mais casas."
+                % (dec, os.path.basename(caminho), len(sel),
+                   max(abs(e) for e, _ in pts), "0" * (dec - 1) + "1"))
         escolhidos[sinal] = sel
         mpa, pct = erro_interpolacao(pts, sel)
         relatorio.append((("compressao" if sinal < 0 else "tracao"),
                           os.path.basename(caminho), len(pts), len(sel), mpa, pct))
 
-    curva = sorted({p for sel in escolhidos.values() for p in sel})
-    dec_e = args.decimais_strain
-    if dec_e is None:
-        dec_e = escolher_decimais([e for e, _ in curva], monotonico=True)
-    dec_s = args.decimais_stress
-    if dec_s is None:
-        dec_s = escolher_decimais([s for _, s in curva])
-    linhas = montar_bloco(curva, args.grupo, args.temperatura,
-                          args.largura, dec_e, dec_s)
+    curva = aplicar_regras(sorted({p for sel in escolhidos.values() for p in sel}),
+                           dec, dec, args.gap_stress)
+    linhas = montar_bloco(curva, args.grupo, args.temperatura, args.largura, dec, dec)
 
     modo = "a" if args.anexar and os.path.exists(args.saida) else "w"
     with open(args.saida, modo, newline="") as f:
@@ -361,8 +390,10 @@ def main():
               % (nome, arq[:28], n_in, n_out, mpa, pct))
     print("\n%s: %d pontos na tabela, %d registros MPC, deformacao de %.*f a %.*f"
           % (os.path.basename(args.saida), len(curva), (len(curva) + 9) // 10,
-             dec_e, curva[0][0], dec_e, curva[-1][0]))
-    print("casas decimais: %d na deformacao, %d na tensao" % (dec_e, dec_s))
+             dec, curva[0][0], dec, curva[-1][0]))
+    menor = min((abs(b[1] - a[1]) for a, b in zip(curva, curva[1:])), default=0.0)
+    print("%d casas decimais | menor degrau de tensao: %.2f MPa (minimo %.2f)"
+          % (dec, menor, args.gap_stress))
     print()
     validar(args.saida, args.largura)
 

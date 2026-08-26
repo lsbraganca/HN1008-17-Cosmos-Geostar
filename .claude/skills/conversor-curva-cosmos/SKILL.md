@@ -40,6 +40,7 @@ Outras chamadas úteis:
 | Um ensaio só (o ramo é detectado pelo sinal) | `--csv arquivo.csv` |
 | N pontos na curva inteira, não por ramo | `--pontos-total 35` |
 | Deformação já adimensional no CSV | `--strain-em absoluto` |
+| Outro degrau mínimo de tensão | `--gap-stress 0.2` |
 | Outra temperatura no mesmo arquivo | `--temperatura 120 --anexar` |
 | Só conferir um .ses existente | `--validar arquivo.ses` |
 
@@ -65,24 +66,37 @@ MPC,<grupo de elementos>,<temperatura>,<grupo de linha>,<strain>,<stress>,... (1
   um número no meio e o resto vai para a linha seguinte, exatamente como o
   arquivo modelo faz. Uma linha lógica pode gerar três ou mais linhas físicas
   quando os números são longos; isso é normal.
-- **Números**: zero à esquerda suprimido (`-.55`, não `-0.55`), zeros à
-  direita cortados, zero puro escrito `0`.
+- **Números**: **no máximo 2 casas decimais** — o Cosmos não aceita mais que
+  isso. Zero à esquerda suprimido (`-.55`, não `-0.55`), zeros à direita
+  cortados, zero puro escrito `0`.
+- **Degrau mínimo de tensão**: pontos consecutivos precisam diferir em pelo
+  menos **0,1 MPa**. Dois pontos praticamente empatados em tensão fazem o
+  solver se perder na interpolação — é melhor um ponto a menos do que dois
+  colados. O script descarta os que violam a regra e pede pontos extras na
+  seleção para fechar a contagem pedida.
 
 Exemplo real de saída:
 
 ```
-MPC,1,23,1,-.66177,-28.222,-.64789,-25.738,-.63557,-23.717,-.62548,-22&
-.154,-.61751,-21.008,-.60042,-18.757,-.58676,-17.093,-.57562,-15.898,-&
-.56548,-14.886,-.55091,-13.535
+MPC,1,23,1,-.66,-28.22,-.65,-25.74,-.64,-23.72,-.63,-22.15,-.62,-21.01&
+,-.6,-18.76,-.59,-17.09,-.58,-15.9,-.57,-14.89,-.55,-13.54
 ```
 
 ## Decisões que mudam o resultado — confirme antes de gerar
 
-**Unidade da deformação.** CSVs de máquina de ensaio quase sempre trazem
-`Deformation(%)`; a tabela do solver usa deformação adimensional. O script
-divide por 100 por padrão. Um ensaio que chega a 268% vira `2.6786`. Se os
-números do CSV já estiverem na mesma faixa do modelo .ses, use
-`--strain-em absoluto`.
+**Unidade da deformação — e o limite que ela esbarra.** CSVs de máquina de
+ensaio quase sempre trazem `Deformation(%)`; a tabela do solver usa deformação
+adimensional, então o script divide por 100 por padrão. Um elastômero que
+chega a 268% vira `2.68` e cabe folgado em 2 casas decimais.
+
+**Metal não cabe.** Um ensaio de alumínio ou aço termina perto de 1% de
+deformação: adimensional isso é `0.0077`, que com 2 casas vira `0.01` — a
+curva inteira colapsa em dois degraus. O script detecta e aborta com essa
+mensagem em vez de gerar lixo. Quando acontecer, **não force mais casas
+decimais por conta própria**: leve o caso ao usuário, porque só ele sabe se o
+Cosmos espera a deformação em % para esse material ou se a coluna do ensaio
+está fora de escala. `--strain-em absoluto` mantém a coluna como veio (0 a
+0,77), que é a saída provisória enquanto ele não responde.
 
 **N por ramo ou N no total.** "35 pontos" costuma significar **35 em cada
 ramo** — 35 na compressão e 35 na tração. Esse é o padrão do script. Se o
@@ -110,9 +124,17 @@ Amostragem uniforme em deformação é tentadora e ruim: gasta pontos no trecho
 linear e perde o joelho, que é justamente onde o solver precisa de resolução.
 
 O erro que importa é o **desvio máximo em MPa entre a curva original e a
-poligonal dos pontos escolhidos**, que o script calcula e imprime. Abaixo de
-~0,5% da tensão de pico a curva é visualmente a mesma; se passar disso,
-proponha mais pontos em vez de entregar calado.
+poligonal dos pontos escolhidos**, que o script calcula e imprime — já contando
+o arredondamento para 2 casas.
+
+Antes de propor mais pontos, veja se o erro está **saturando**. As 2 casas
+decimais criam um piso: num trecho onde a tensão anda rápido com pouca
+deformação, mexer a deformação em ±0,005 já desloca vários MPa, e nenhum
+número de pontos conserta isso. Rode com 35, 45 e 60 e compare — se o erro
+mal se move (o HN1008-17 fica em ~2,5% na compressão nos três), o piso é do
+formato e 35 pontos bastam; dizer isso ao usuário vale mais do que entregar
+uma tabela três vezes maior sem ganho. Se o erro cai de verdade, aí sim
+proponha o número maior.
 
 ## Anomalias nos dados — sinalize, não conserte sozinho
 
