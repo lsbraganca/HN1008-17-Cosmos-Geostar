@@ -144,6 +144,33 @@ def erro_interpolacao(completo, escolhidos):
 # escrita no formato MPC
 # --------------------------------------------------------------------------
 
+def escolher_decimais(valores, monotonico=False, minimo=2, maximo=12):
+    """Quantas casas decimais preservam a curva depois do arredondamento.
+
+    O criterio e relativo a AMPLITUDE da grandeza, nao ao valor de cada ponto:
+    guarda ~5 digitos significativos em relacao ao maior valor da curva. Isso
+    importa porque a faixa muda muito de material para material -- um elastomero
+    chega a 2,7 de deformacao e 5 casas bastam, enquanto um metal para em 0,0077
+    e 5 casas achatariam o trecho elastico inteiro em poucos degraus.
+
+    Com `monotonico`, tambem exige que os valores continuem estritamente
+    crescentes depois de arredondados: dois pontos que colapsam no mesmo valor
+    invalidariam a tabela.
+    """
+    pico = max((abs(v) for v in valores), default=0.0)
+    if not pico:
+        return minimo
+    tolerancia = pico * 1e-5
+    for d in range(minimo, maximo + 1):
+        arred = [round(v, d) for v in valores]
+        if max(abs(a - v) for a, v in zip(arred, valores)) > tolerancia:
+            continue
+        if monotonico and any(b <= a for a, b in zip(arred, arred[1:])):
+            continue
+        return d
+    return maximo
+
+
 def fmt(v, dec):
     """Numero no estilo do arquivo modelo: -0.55 vira -.55, zeros a direita caem."""
     s = "%.*f" % (dec, v)
@@ -264,8 +291,10 @@ def main():
                     help="unidade da deformacao no CSV (padrao percent)")
     ap.add_argument("--largura", type=int, default=70,
                     help="caracteres de dado por linha, antes do & (padrao 70)")
-    ap.add_argument("--decimais-strain", type=int, default=5)
-    ap.add_argument("--decimais-stress", type=int, default=3)
+    ap.add_argument("--decimais-strain", type=int,
+                    help="casas decimais da deformacao (padrao: automatico)")
+    ap.add_argument("--decimais-stress", type=int,
+                    help="casas decimais da tensao (padrao: automatico)")
     ap.add_argument("--anexar", action="store_true",
                     help="acrescenta o bloco a um .ses existente (outra temperatura)")
     ap.add_argument("--validar", help="so confere um .ses existente e sai")
@@ -313,8 +342,14 @@ def main():
                           os.path.basename(caminho), len(pts), len(sel), mpa, pct))
 
     curva = sorted({p for sel in escolhidos.values() for p in sel})
+    dec_e = args.decimais_strain
+    if dec_e is None:
+        dec_e = escolher_decimais([e for e, _ in curva], monotonico=True)
+    dec_s = args.decimais_stress
+    if dec_s is None:
+        dec_s = escolher_decimais([s for _, s in curva])
     linhas = montar_bloco(curva, args.grupo, args.temperatura,
-                          args.largura, args.decimais_strain, args.decimais_stress)
+                          args.largura, dec_e, dec_s)
 
     modo = "a" if args.anexar and os.path.exists(args.saida) else "w"
     with open(args.saida, modo, newline="") as f:
@@ -324,9 +359,10 @@ def main():
     for nome, arq, n_in, n_out, mpa, pct in relatorio:
         print("%-12s %-28s %6d  %6d   %6.3f MPa (%.2f%% do pico)"
               % (nome, arq[:28], n_in, n_out, mpa, pct))
-    print("\n%s: %d pontos na tabela, %d registros MPC, deformacao de %.5f a %.5f"
-          % (os.path.basename(args.saida), len(curva),
-             (len(curva) + 9) // 10, curva[0][0], curva[-1][0]))
+    print("\n%s: %d pontos na tabela, %d registros MPC, deformacao de %.*f a %.*f"
+          % (os.path.basename(args.saida), len(curva), (len(curva) + 9) // 10,
+             dec_e, curva[0][0], dec_e, curva[-1][0]))
+    print("casas decimais: %d na deformacao, %d na tensao" % (dec_e, dec_s))
     print()
     validar(args.saida, args.largura)
 
