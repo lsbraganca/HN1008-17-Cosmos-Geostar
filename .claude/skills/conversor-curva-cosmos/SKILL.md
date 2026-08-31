@@ -82,6 +82,55 @@ MPC,1,23,1,-.66,-28.22,-.65,-25.74,-.64,-23.72,-.63,-22.15,-.62,-21.01&
 ,-.6,-18.76,-.59,-17.09,-.58,-15.9,-.57,-14.89,-.55,-13.54
 ```
 
+## Curva que não converge — `scripts/suavizar_ses.py`
+
+Um `.ses` fiel ao ensaio pode ser ruim de solver. O sintoma é sempre o mesmo:
+**degrau de rigidez entre pontos vizinhos**. Passos de deformação desiguais
+(0,01 aqui, 0,09 ali) mais a tensão em 2 casas fazem o módulo tangente de cada
+trecho serrilhar — no HN1008-17 a 150 °C ele ia 11 → 28 → 11 → 5,8 → 8,8 → 7 →
+2 → 6,6 MPa em pontos consecutivos ao redor do zero. O Newton monta a rigidez
+com esse número; se ele triplica e cai pela metade de um trecho para o outro, a
+análise oscila e para antes do fim.
+
+`suavizar_ses.py` reamostra a curva mantendo o ensaio:
+
+```bash
+python3 scripts/suavizar_ses.py \
+  --entrada HN1008-17_150C_original.ses --saida HN1008-17_150C.ses
+```
+
+Três etapas, todas no espaço do **módulo**, que é o que o solver enxerga:
+
+1. Ajusta `E(eps) = exp(g(eps))` por Gauss-Newton contra os pontos do ensaio,
+   penalizando a curvatura de `g`. Como a tensão sai da integral de `E` a partir
+   da origem, `sigma(0)=0` e `E>0` valem por construção — não há como o ajuste
+   devolver rigidez negativa. Penalizar `log E`, e não `sigma`, é adimensional e
+   pesa igual a compressão (E ~ 270 MPa) e a tração (E ~ 4 MPa).
+2. Escolhe as deformações de modo que `log E` ande um tanto fixo por segmento
+   (`--dlog`, 12 % por padrão), limitado a `[--passo-min, --passo-max]`. Passo
+   curto onde a curva encurva, longo onde ela é reta. **Amostrar uniforme em
+   deformação não resolve**: no pé da curva de compressão o módulo cai 15 % a
+   cada 0,02 de deformação, e num trecho reto 0,15 não perde nada.
+3. Arredonda para 2 casas com programação dinâmica: entre piso, arredondado e
+   teto de cada tensão, escolhe a combinação cujos módulos ficam mais perto dos
+   da curva suave. Num degrau de 0,3 MPa, ±0,005 já move o módulo do trecho em
+   3 % — arredondar cada ponto isolado joga essa folga fora.
+
+O relatório mostra a **razão de módulo entre segmentos vizinhos**, antes e
+depois. É o número que decide convergência: `[0,29 .. 3,30]` é curva que trava,
+`[0,86 .. 1,11]` é curva que roda.
+
+### O piso de 2 casas decimais vale aqui também
+
+Perto do zero a tensão é pequena e o arredondamento é grosseiro: em `eps = -0,11`
+um desvio de 0,11 MPa é 25 % da tensão, e é só **um passo de arredondamento**.
+Relate o desvio em MPa junto com o percentual, senão o engenheiro lê 25 % e
+pensa que a curva mudou de material.
+
+Onde os dois efeitos brigam — módulo variando rápido *e* tensão baixa — existe
+um passo ótimo, `h ~ sqrt(0,02 / (E * dlogE/deps))`, e mesmo nele a razão fica
+em torno de 0,85. Não gaste pontos tentando passar disso; o limite é do formato.
+
 ## Decisões que mudam o resultado — confirme antes de gerar
 
 **Unidade da deformação — e o limite que ela esbarra.** CSVs de máquina de
